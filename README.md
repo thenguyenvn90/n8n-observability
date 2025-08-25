@@ -120,7 +120,14 @@ Copy the whole `admin:$$2y$$...` into `TRAEFIK_BASIC_AUTH_USERS=` in `.env`.
 
 ```bash
 docker compose pull          # fetch latest images
-docker compose up -d         # start everything in the background
+
+# Manual create volume
+for v in n8n-data postgres-data redis-data letsencrypt; do docker volume create "$v"; done
+docker volume ls | grep -E 'n8n-data|postgres-data|redis-data|letsencrypt'
+
+# Start everything (Traefik, Postgres, Redis, n8n-main, 1 worker)
+docker compose up -d
+
 docker compose ps            # check containers are healthy
 ```
 
