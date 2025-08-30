@@ -109,6 +109,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    command: ["start"]
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
       interval: 10s
@@ -192,7 +193,9 @@ services:
       - "traefik.http.routers.prom.tls.certresolver=le"
       - "traefik.http.services.prom.loadbalancer.server.port=9090"
       - "traefik.http.routers.prom.middlewares=prom-auth"
+      - "traefik.http.routers.prometheus.middlewares=prom-auth@docker"
       - "traefik.http.middlewares.prom-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS}"
+      #- "traefik.http.middlewares.prom-auth.basicauth.users=admin:$$2y$$05$$sMGDCe4rmqzDJFdBGQY9DOQ6Ztwcq6vXHvPnIMV4Fq4h8b/juXiNG"
 
   grafana:
     image: grafana/grafana:latest
@@ -203,13 +206,24 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_SERVER_DOMAIN=${SUBDOMAIN_GRAFANA}.${DOMAIN}
       - GF_SERVER_ROOT_URL=https://${SUBDOMAIN_GRAFANA}.${DOMAIN}
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
       - grafana-data:/var/lib/grafana
       - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/provisioning/alerts:/etc/grafana/provisioning/alerts:ro
     networks: [n8n-network]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`${SUBDOMAIN_GRAFANA}.${DOMAIN}`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls=true"
+      - "traefik.http.routers.grafana.tls.certresolver=le"
+      - "traefik.http.services.grafana.loadbalancer.server.port=3000"
+      - "traefik.http.routers.grafana.middlewares=grafana-auth@docker"
+      - "traefik.http.middlewares.grafana-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS}"
     depends_on:
       - prometheus
-      - loki
     # (Optional) expose locally the first time:
     # ports: ["3000:3000"]
 
@@ -247,33 +261,20 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks: [n8n-network]
-
-  # =========================
-  # Monitoring: Logs
-  # =========================
-  loki:
-    image: grafana/loki:latest
-    container_name: loki
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
     restart: unless-stopped
-    command: ["-config.file=/etc/loki/loki-config.yml"]
+    pid: "host"
+    network_mode: "host"
     volumes:
-      - ./monitoring/loki-config.yml:/etc/loki/loki-config.yml:ro
-      - loki-data:/var/loki
-    networks: [n8n-network]
-
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
-    restart: unless-stopped
-    command: ["-config.file=/etc/promtail/promtail-config.yml"]
-    volumes:
-      - ./monitoring/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
-      - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /var/log:/var/log:ro   # optional (only if you tail host/file logs)
-    networks: [n8n-network]
-    depends_on:
-      - loki
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
 
 networks:
   n8n-network:
@@ -292,4 +293,3 @@ volumes:
   # Monitoring volumes
   prometheus-data:
   grafana-data:
-  loki-data:
