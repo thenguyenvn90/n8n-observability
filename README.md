@@ -1,37 +1,35 @@
 # n8n-observability
-A complete observability stack for n8n, featuring **Prometheus, Grafana, Loki, cAdvisor, Traefik metrics, and exporters** — with optional tools for debugging and insights.
 
-This guide will help you deploy **n8n** (queue mode) with a **full monitoring stack** on Docker Compose:
-- HTTPS reverse proxy: **Traefik**
-- Database / Cache: **Postgres**, **Redis**
-- Metrics: **Prometheus**, **Exporters (Postgres/Redis)**, **cAdvisor**
-- Dashboards & Alerts: **Grafana**
-- Centralized logs: **Loki + Promtail**
-- n8n main + worker + external task runner (queue mode)
+A complete, production-ready observability stack for **n8n (queue mode)** using **Traefik, Prometheus, Grafana, cAdvisor, and exporters**.
 
-It’s written for operators without deep DevOps experience—follow each step and you’ll be up and running.
+> **What you get**
+>
+> - Reverse proxy & HTTPS: **Traefik** (auto TLS via Let’s Encrypt)
+> - Data services: **PostgreSQL**, **Redis**
+> - Metrics: **Prometheus**, **cAdvisor**, **Postgres/Redis exporters**, n8n + Traefik metrics
+> - Dashboards & Alerts: **Grafana** (pre-provisioned datasource & folders)
+> - n8n in **queue mode**: `main` + `worker` + **external task runner**
 
 ---
 
 ## Table of Contents
+
 1. [Prerequisites](#prerequisites)
 2. [Folder Layout](#folder-layout)
 3. [.env Configuration](#env-configuration)
 4. [DNS Records](#dns-records)
-5. [Traefik Basic Auth (for dashboards)](#traefik-basic-auth-for-dashboards)
+5. [Traefik Basic Auth (dashboards)](#traefik-basic-auth-dashboards)
 6. [Compose Files & Configs](#compose-files--configs)
 7. [Bring the Stack Up](#bring-the-stack-up)
 8. [Health Checks & Sanity Testing](#health-checks--sanity-testing)
 9. [Accessing Dashboards](#accessing-dashboards)
 10. [Dashboards to Import](#dashboards-to-import)
-11. [Using Logs (Loki + Promtail)](#using-logs-loki--promtail)
-12. [Alerts to Set Up](#alerts-to-set-up)
-13. [Maintenance & Upgrades](#maintenance--upgrades)
-14. [Backups](#backups)
-15. [Security Tips](#security-tips)
-16. [Troubleshooting](#troubleshooting)
-17. [FAQ](#faq)
-
+11. [Alerts to Set Up](#alerts-to-set-up)
+12. [Maintenance & Upgrades](#maintenance--upgrades)
+13. [Backups](#backups)
+14. [Security Tips](#security-tips)
+15. [Troubleshooting](#troubleshooting)
+16. [FAQ](#faq)
 ---
 
 ## Prerequisites
@@ -56,20 +54,22 @@ It’s written for operators without deep DevOps experience—follow each step a
 Create the folders:
 
 ```bash
-mkdir -p ~/n8n-stack/monitoring/grafana/provisioning/datasources
-cd ~/n8n-stack
+mkdir -p ~/n8n-observability/monitoring/grafana/provisioning/datasources
+mkdir -p ~/n8n-observability/secrets
+cd ~/n8n-observability
+
 ```
 
 Your tree will look like:
 
 ```
-n8n-stack/
+n8n-observability/
 ├─ docker-compose.yml
 ├─ .env
+├─ secrets/
+│  └─ htpasswd
 └─ monitoring/
    ├─ prometheus.yml
-   ├─ loki-config.yml
-   ├─ promtail-config.yml
    └─ grafana/
       └─ provisioning/
          └─ datasources/
@@ -96,29 +96,29 @@ Create **A/AAAA** records pointing to your server IP:
 
 - `n8n.${DOMAIN}`
 - `grafana.${DOMAIN}`
-- `prometheus.${DOMAIN}`
-
-Example: `n8n.domain.com → 203.0.113.10`
+- `prometheus.${DOMAIN}` (optional; only if you plan to expose Prometheus UI)
 
 ---
 
 ## Traefik Basic Auth for Dashboards
 
-Generate a bcrypt-protected user for the Grafana/Prometheus routes and **escape `$` as `$$`** before pasting into `.env`:
+Create a protected user for Grafana/Prometheus routes:
 
 ```bash
-# Replace admin and 'YourSuperSecret' as needed
-docker run --rm httpd:2.4-alpine htpasswd -nbB admin 'YourSuperSecret' \
-  | sed -e 's/\$/\$\$/g'
+# Requires: apt install -y apache2-utils (or use docker httpd)
+mkdir -p secrets
+htpasswd -nbB admin 'YourSuperSecret' > ./secrets/htpasswd
 ```
 
-Copy the whole `admin:$$2y$$...` into `TRAEFIK_BASIC_AUTH_USERS=` in `.env`.
+> This file is mounted into Traefik and used by the Basic Auth middleware.
 
 ---
 
 ## Bring the Stack Up
 
 ```bash
+
+
 docker compose pull          # fetch latest images
 
 # Manual create volume
@@ -134,9 +134,8 @@ docker compose ps            # check containers are healthy
 If a container restarts repeatedly, inspect logs:
 
 ```bash
-docker compose logs -f traefik prometheus grafana loki promtail postgres-exporter redis-exporter cadvisor n8n-main n8n-worker
+docker compose logs -f traefik prometheus grafana postgres-exporter redis-exporter cadvisor n8n-main n8n-worker
 ```
-
 ---
 
 ## Health Checks & Sanity Testing
@@ -152,8 +151,6 @@ docker compose exec prometheus wget -qO- http://traefik:8081/metrics | head
 # Prometheus targets count (should be >= the jobs you configured)
 docker compose exec prometheus wget -qO- http://prometheus:9090/api/v1/targets | jq '.data.activeTargets | length'
 
-# Loki readiness
-docker compose exec grafana wget -qO- http://loki:3100/ready
 ```
 
 ### Prometheus UI (optional)
@@ -170,11 +167,10 @@ Open `https://prometheus.${DOMAIN}` → **Status → Targets**. All targets shou
 ## Accessing Dashboards
 
 - **Grafana**: `https://grafana.${DOMAIN}`  
-  - First prompt: **Traefik basic auth** (user/password you created).
-  - Then Grafana login (default `admin/admin` → change immediately).
+  - First prompt: **Traefik basic auth** (user/password from secrets/htpasswd).
+  - Then Grafana login: admin / ${GRAFANA_ADMIN_PASSWORD}.
 - **Prometheus** (optional): `https://prometheus.${DOMAIN}`  
-  - Use for raw PromQL and to check scrape targets.
-
+  - Disabled by default (set EXPOSE_PROMETHEUS=true to expose; still behind Basic Auth)
 ---
 
 ## Dashboards to Import
@@ -188,32 +184,7 @@ Recommended:
 - **Node.js / Process dashboard** (good fit for n8n’s Node runtime)
 - **cAdvisor / Container overview** (any popular container-level dashboard)
 
-> Once imported, edit panels as needed (e.g., filter by `compose_service="n8n-main"`).
-
----
-
-## Using Logs (Loki + Promtail)
-
-Grafana → **Explore** → Data source: **Loki**
-
-Common queries (LogQL):
-```logql
-# All n8n main logs
-{compose_service="n8n-main"}
-
-# Only error lines from n8n main
-{compose_service="n8n-main"} |= "ERROR"
-
-# Traefik 5xx (if your access logs go to stdout; otherwise tail a JSON file)
-{compose_service="traefik"} |~ " 5\\d\\d "
-
-# Redis evictions
-{compose_service="redis"} |= "evicted"
-```
-
-Tips:
-- Use labels like `compose_service`, `container_name`, `stream`.
-- Switch **Live** to tail logs during deployments.
+> Filter panels by labels like compose_service="main" or compose_service="worker".
 
 ---
 
@@ -292,7 +263,7 @@ docker run --rm -v letsencrypt:/data -v $PWD:/backup busybox \
 ## Security Tips
 
 - Strong, unique passwords; rotate regularly.
-- Keep **Prometheus** public only if necessary (you can remove its Traefik labels to keep it internal).
+- Keep Prometheus internal unless you need the UI (EXPOSE_PROMETHEUS=false).
 - Limit access to Grafana/Prometheus with basic auth and IP allowlists if possible.
 - Keep **Traefik dashboard disabled** on the public internet (you have `--api.dashboard=false`).
 - Keep Docker, images, and the host OS up to date.
@@ -321,23 +292,8 @@ docker run --rm -v letsencrypt:/data -v $PWD:/backup busybox \
 **Postgres exporter DOWN**
 - Ensure `DATA_SOURCE_NAME` matches your DB name/user/password.
 
-**Promtail errors about inotify limits**
-- Increase file watch limit on the host:
-  ```bash
-  echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf
-  sudo sysctl -p
-  ```
-
-**Loki shows no logs**
-- Confirm Promtail has access to:
-  - `/var/run/docker.sock`
-  - `/var/lib/docker/containers`
-
 **n8n main is up but workers idle**
 - Check Redis connectivity (password/host).
 - Ensure `EXECUTIONS_MODE=queue` and worker command has proper `--concurrency`.
 
 ---
-
-You’re done ✅ — deploy, verify health, then import dashboards and set a few alerts.
-If you get stuck, copy any error logs and I’ll help you fix them quickly.
