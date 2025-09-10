@@ -1,6 +1,6 @@
 # n8n-observability
 
-A complete, production-ready observability stack for **n8n (queue mode)** using **Traefik, Prometheus, Grafana, cAdvisor, and exporters**.
+**n8n-observability** is a ready-to-use monitoring stack for n8n (queue mode) with production-level metrics, dashboards, and alerts—built on Prometheus, Grafana, Traefik, and exporters for PostgreSQL, Redis, Node, and containers.
 
 > **What you get**
 >
@@ -140,6 +140,65 @@ docker compose logs -f traefik prometheus grafana postgres-exporter redis-export
 
 ## Health Checks & Sanity Testing
 
+### Checking Logs After Deployment
+
+After deploying, it's important to check service logs to confirm everything is healthy, catch early errors, and debug issues.
+
+#### If you’re inside the compose project directory (recommended):
+
+**Merged, live stream of all services in the stack:**
+
+```bash
+docker compose logs -f --tail=200
+```
+- `-f` follows the log stream in real-time.
+- `--tail=200` shows the last 200 lines per service.
+- Add `--since=10m` to limit to recent logs, `--no-color` for dumping to a file.
+
+#### From anywhere (explicit paths):
+
+```bash
+docker compose \
+  --project-directory /home/n8n \
+  -f /home/n8n/docker-compose.yml \
+  --env-file /home/n8n/.env \
+  logs -f --tail=200
+```
+- Useful for scripts or when your compose files are in custom locations.
+
+#### All Docker containers on the host
+
+**One-shot (no follow), grouped by container:**
+
+```bash
+docker ps -q | xargs -I{} sh -c 'echo "===== {} ====="; docker logs --tail=200 {}'
+```
+
+**Live stream for every running container, merged with name prefix:**
+
+```bash
+for c in $(docker ps -q); do
+  n=$(docker inspect -f '{{.Name}}' "$c" | sed 's#^/##')
+  docker logs -f --tail=0 "$c" | sed "s/^/[$n] /" &
+done; wait
+```
+- This will prefix each line with the container name, making merged logs easier to read.
+
+#### With your toolkit
+
+If you use a wrapper (e.g., `compose()` in your toolkit after sourcing `common.sh` and setting `N8N_DIR`/`ENV_FILE`/`COMPOSE_FILE`):
+
+```bash
+compose logs -f --tail=200
+```
+
+---
+
+Check logs for errors, restarts, or warnings—especially in `n8n-main`, `n8n-worker`, and critical infrastructure (`traefik`, `postgres`, `redis`, `grafana`).  
+If you see repeated restarts or errors, consult the troubleshooting section below.
+
+---
+
 ### Quick CLI checks
 ```bash
 # n8n metrics reachable from Prometheus network?
@@ -175,16 +234,24 @@ Open `https://prometheus.${DOMAIN}` → **Status → Targets**. All targets shou
 
 ## Dashboards to Import
 
-In Grafana → **Dashboards → Import**, search by ID (from grafana.com) or JSON export files.
+In Grafana, go to **Dashboards → Import**, search by ID or paste JSON.
 
-Recommended:
-- **Traefik v2 dashboard**
-- **Postgres exporter dashboard**
-- **Redis exporter dashboard**
-- **Node.js / Process dashboard** (good fit for n8n’s Node runtime)
-- **cAdvisor / Container overview** (any popular container-level dashboard)
+**Recommended dashboards:**
 
-> Filter panels by labels like compose_service="main" or compose_service="worker".
+| Service          | Dashboard Name                | Grafana Dashboard ID | Link |
+|------------------|------------------------------|----------------------|------|
+| **n8n**          | n8n Queue Mode (Basic)        | *(see below JSON)*    |      |
+| **Traefik**      | Traefik v2 Metrics           | 12250                | [Traefik 2.x Dashboard](https://grafana.com/grafana/dashboards/12250) |
+| **PostgreSQL**   | PostgreSQL Exporter Dashboard| 9628                 | [Postgres Exporter Dashboard](https://grafana.com/grafana/dashboards/9628) |
+| **Redis**        | Redis Dashboard for Prometheus| 763                  | [Redis Dashboard](https://grafana.com/grafana/dashboards/763) |
+| **Node Exporter**| Node Exporter Full           | 1860                 | [Node Exporter Full](https://grafana.com/grafana/dashboards/1860) |
+| **cAdvisor**     | cAdvisor Exporter Dashboard  | 14282                | [cAdvisor Dashboard](https://grafana.com/grafana/dashboards/14282) |
+
+**How to import:**
+1. Go to Grafana → Dashboards → Import.
+2. Enter the Dashboard ID from the table above.
+3. Select your Prometheus datasource.
+4. Click Import.
 
 ---
 
@@ -297,3 +364,15 @@ docker run --rm -v letsencrypt:/data -v $PWD:/backup busybox \
 - Ensure `EXECUTIONS_MODE=queue` and worker command has proper `--concurrency`.
 
 ---
+
+## Contributing
+
+Contributions, feedback, and new dashboard templates are welcome!  
+- Open an issue or pull request.
+
+---
+
+## License
+
+This repository is MIT licensed.  
+Community dashboard JSONs are attributed to their respective authors (see links in the table above).
