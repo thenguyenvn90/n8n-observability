@@ -3,22 +3,47 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'prometheus'
-    static_configs: [{ targets: ['prometheus:9090'] }]
+  # Prometheus self-scrape
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
 
-  - job_name: 'n8n'
+  # n8n (main service exposes /metrics on 5678)
+  - job_name: n8n
     metrics_path: /metrics
-    static_configs: [{ targets: ['n8n-main:5678'] }]
+    static_configs:
+      - targets: ["main:5678"]
 
-  - job_name: 'traefik'
+  # Traefik metrics (internal entrypoint on :8081)
+  - job_name: traefik
     metrics_path: /metrics
-    static_configs: [{ targets: ['traefik:8081'] }]
+    static_configs:
+      - targets: ["traefik:8081"]
 
-  - job_name: 'postgres'
-    static_configs: [{ targets: ['postgres-exporter:9187'] }]
+  # Postgres exporter
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
 
-  - job_name: 'redis'
-    static_configs: [{ targets: ['redis-exporter:9121'] }]
+  # Redis exporter
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
 
-  - job_name: 'cadvisor'
-    static_configs: [{ targets: ['cadvisor:8080'] }]
+  # cAdvisor (container metrics)
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # --- OPTIONAL: Node Exporter ---
+  Use this if your node-exporter runs on the same Docker network (no host networking).
+  - job_name: node-exporter
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # If your node-exporter uses `network_mode: host`, add to the Prometheus
+  # service: `extra_hosts: ["host.docker.internal:host-gateway"]`
+  # Then use this target instead:
+  # - job_name: node-exporter-host
+  #   static_configs:
+  #     - targets: ["host.docker.internal:9100"]
