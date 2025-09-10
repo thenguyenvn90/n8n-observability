@@ -240,9 +240,9 @@ In Grafana, go to **Dashboards → Import**, search by ID or paste JSON.
 
 | Service          | Dashboard Name                | Grafana Dashboard ID | Link |
 |------------------|------------------------------|----------------------|------|
-| **n8n**          | n8n Queue Mode (Basic)        | *(see below JSON)*    |      |
+| **n8n**          | n8n Queue Mode (Full)        | *(see JSON under dashboard directory)*    |      |
 | **Traefik**      | Traefik v2 Metrics           | 12250                | [Traefik 2.x Dashboard](https://grafana.com/grafana/dashboards/12250) |
-| **PostgreSQL**   | PostgreSQL Exporter Dashboard| 9628                 | [Postgres Exporter Dashboard](https://grafana.com/grafana/dashboards/9628) |
+| **PostgreSQL**   | PostgreSQL Database          | 9628                 | [Postgres Exporter Dashboard](https://grafana.com/grafana/dashboards/9628) |
 | **Redis**        | Redis Dashboard for Prometheus| 763                  | [Redis Dashboard](https://grafana.com/grafana/dashboards/763) |
 | **Node Exporter**| Node Exporter Full           | 1860                 | [Node Exporter Full](https://grafana.com/grafana/dashboards/1860) |
 | **cAdvisor**     | cAdvisor Exporter Dashboard  | 14282                | [cAdvisor Dashboard](https://grafana.com/grafana/dashboards/14282) |
