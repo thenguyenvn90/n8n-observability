@@ -4,10 +4,9 @@ services:
   # =========================
   traefik:
     image: traefik:v2.11
-    container_name: traefik
     restart: unless-stopped
     command:
-      - "--api.dashboard=false"
+      - "--api.dashboard=true"
       # EntryPoints
       - "--entrypoints.web.address=:80"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -16,6 +15,7 @@ services:
       # Providers
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=n8n-network"
       # ACME (production)
       - "--certificatesresolvers.le.acme.email=${SSL_EMAIL}"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
@@ -27,7 +27,7 @@ services:
       - "--ping=true"
       - "--ping.entrypoint=traefikping"
       - "--entrypoints.traefikping.address=:8082"
-      # --- Monitoring: Prometheus metrics on internal entrypoint :8081 ---
+      # Prometheus metrics (internal entrypoint)
       - "--metrics.prometheus=true"
       - "--metrics.prometheus.addEntryPointsLabels=true"
       - "--metrics.prometheus.addRoutersLabels=true"
@@ -37,11 +37,12 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      # (no public port for metrics; Prometheus scrapes on the Docker network)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - letsencrypt:/letsencrypt
+      - ./secrets/htpasswd:${TRAEFIK_USERSFILE}:ro
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/ping"]
       interval: 10s
@@ -54,13 +55,12 @@ services:
   # =========================
   postgres:
     image: postgres:14
-    container_name: postgres
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}"]
       interval: 10s
@@ -70,12 +70,12 @@ services:
 
   redis:
     image: redis:7
-    container_name: redis
     restart: unless-stopped
     command: ["redis-server", "--requirepass", "${STRONG_PASSWORD}"]
     volumes:
       - redis-data:/data
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${STRONG_PASSWORD}", "ping"]
       interval: 10s
@@ -86,21 +86,13 @@ services:
   # =========================
   # n8n (queue mode)
   # =========================
-  n8n-main:
+  main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
-    container_name: n8n-main
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       - N8N_METRICS=true
-      - N8N_PORT=5678
-      - N8N_PROTOCOL=https
-      - N8N_HOST=${SUBDOMAIN_N8N}.${DOMAIN}
-      - WEBHOOK_URL=https://${SUBDOMAIN_N8N}.${DOMAIN}
-      - N8N_EDITOR_BASE_URL=https://${SUBDOMAIN_N8N}.${DOMAIN}
-      - N8N_PUBLIC_API_BASE_URL=https://${SUBDOMAIN_N8N}.${DOMAIN}
-      - N8N_SECURE_COOKIE=true
+      - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
@@ -111,56 +103,62 @@ services:
         condition: service_healthy
     command: ["start"]
     healthcheck:
-      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:${N8N_PORT:-5678}/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       start_period: 20s
       retries: 5
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=n8n-network"
       # Router & TLS
-      - "traefik.http.routers.n8n.rule=Host(`${SUBDOMAIN_N8N}.${DOMAIN}`)"
+      - "traefik.http.routers.n8n.rule=Host(`${N8N_FQDN}`)"
       - "traefik.http.routers.n8n.entrypoints=websecure"
       - "traefik.http.routers.n8n.tls=true"
       - "traefik.http.routers.n8n.tls.certresolver=le"
-      # Explicitly bind router -> this service
+      # Bind router -> this service (Traefik service name is arbitrary)
       - "traefik.http.routers.n8n.service=n8n-main"
-      # Tell Traefik the internal port for THIS service
       - "traefik.http.services.n8n-main.loadbalancer.server.port=5678"
-      # Middlewares
+      # Middlewares (security + rate limit + compression)
       - "traefik.http.routers.n8n.middlewares=n8n-headers,n8n-rate,n8n-retry,n8n-compress"
-      - "traefik.http.middlewares.n8n-headers.headers.STSSeconds=315360000"
-      - "traefik.http.middlewares.n8n-headers.headers.browserXSSFilter=true"
+      - "traefik.http.middlewares.n8n-headers.headers.stsSeconds=315360000"
+      - "traefik.http.middlewares.n8n-headers.headers.browserXssFilter=true"
       - "traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true"
       - "traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true"
-      - "traefik.http.middlewares.n8n-headers.headers.STSIncludeSubdomains=true"
-      - "traefik.http.middlewares.n8n-headers.headers.STSPreload=true"
+      - "traefik.http.middlewares.n8n-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.n8n-headers.headers.stsPreload=true"
       - "traefik.http.middlewares.n8n-rate.ratelimit.average=100"
       - "traefik.http.middlewares.n8n-rate.ratelimit.burst=50"
       - "traefik.http.middlewares.n8n-rate.ratelimit.period=1s"
       - "traefik.http.middlewares.n8n-retry.retry.attempts=3"
       - "traefik.http.middlewares.n8n-compress.compress=true"
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
 
-  n8n-runner-main:
+  # External Task Runner for n8n-main
+  runner-main:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG}
-    container_name: n8n-runner-main
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
+    environment:
+      - N8N_METRICS=true
     entrypoint: ["/usr/local/bin/task-runner-launcher"]
     command: ["javascript"]
     depends_on:
-      n8n-main:
+      main:
         condition: service_started
+      redis:
+        condition: service_healthy
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
 
-  n8n-worker:
+  # Worker(s) – scale horizontally
+  worker:
     image: docker.n8n.io/n8nio/n8n:${N8N_IMAGE_TAG:-latest}
-    container_name: n8n-worker
     restart: unless-stopped
-    env_file:
-      - .env
+    env_file: [.env]
+    environment:
+      - N8N_METRICS=true
     command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
     volumes:
       - n8n-data:/home/node/.n8n
@@ -171,13 +169,14 @@ services:
       redis:
         condition: service_healthy
     networks: [n8n-network]
+    security_opt: [no-new-privileges:true]
 
   # =========================
-  # Monitoring: Metrics
+  # Monitoring (profile)
   # =========================
   prometheus:
+    profiles: ["monitoring"]
     image: prom/prometheus:latest
-    container_name: prometheus
     restart: unless-stopped
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
@@ -187,25 +186,27 @@ services:
       - prometheus-data:/prometheus
     networks: [n8n-network]
     labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.prom.rule=Host(`${SUBDOMAIN_PROMETHEUS}.${DOMAIN}`)"
+      - "traefik.enable=${EXPOSE_PROMETHEUS:-false}"
+      - "traefik.docker.network=n8n-network"
+      - "traefik.http.routers.prom.rule=Host(`${PROMETHEUS_FQDN}`)"
       - "traefik.http.routers.prom.entrypoints=websecure"
       - "traefik.http.routers.prom.tls.certresolver=le"
       - "traefik.http.services.prom.loadbalancer.server.port=9090"
-      - "traefik.http.routers.prom.middlewares=prom-auth"
-      - "traefik.http.routers.prometheus.middlewares=prom-auth@docker"
-      - "traefik.http.middlewares.prom-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS}"
-      #- "traefik.http.middlewares.prom-auth.basicauth.users=admin:$$2y$$05$$sMGDCe4rmqzDJFdBGQY9DOQ6Ztwcq6vXHvPnIMV4Fq4h8b/juXiNG"
+      - "traefik.http.routers.prom.middlewares=prom-auth@docker"
+      - "traefik.http.middlewares.prom-auth.basicauth.usersfile=${TRAEFIK_USERSFILE}"
 
   grafana:
+    profiles: ["monitoring"]
     image: grafana/grafana:latest
-    container_name: grafana
     restart: unless-stopped
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_SERVER_DOMAIN=${SUBDOMAIN_GRAFANA}.${DOMAIN}
-      - GF_SERVER_ROOT_URL=https://${SUBDOMAIN_GRAFANA}.${DOMAIN}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
+      - GF_SERVER_DOMAIN=${GRAFANA_FQDN}
+      - GF_SERVER_ROOT_URL=https://${GRAFANA_FQDN}
+      - GF_SERVER_ENFORCE_DOMAIN=true
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_USERS_ALLOW_SIGN_UP=false
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
       - grafana-data:/var/lib/grafana
@@ -215,21 +216,29 @@ services:
     networks: [n8n-network]
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.grafana.rule=Host(`${SUBDOMAIN_GRAFANA}.${DOMAIN}`)"
+      - "traefik.docker.network=n8n-network"
+      - "traefik.http.routers.grafana.rule=Host(`${GRAFANA_FQDN}`)"
       - "traefik.http.routers.grafana.entrypoints=websecure"
       - "traefik.http.routers.grafana.tls=true"
       - "traefik.http.routers.grafana.tls.certresolver=le"
       - "traefik.http.services.grafana.loadbalancer.server.port=3000"
-      - "traefik.http.routers.grafana.middlewares=grafana-auth@docker"
-      - "traefik.http.middlewares.grafana-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS}"
+      # Proxy Basic Auth (users file)
+      - "traefik.http.routers.grafana.middlewares=grafana-auth@docker,secure-headers@docker"
+      - "traefik.http.middlewares.grafana-auth.basicauth.usersfile=${TRAEFIK_USERSFILE}"
+      - "traefik.http.middlewares.grafana-auth.basicauth.removeheader=true"
+      # Harden headers
+      - "traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.secure-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.secure-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true"
     depends_on:
-      - prometheus
-    # (Optional) expose locally the first time:
-    # ports: ["3000:3000"]
+      prometheus:
+        condition: service_started
 
   postgres-exporter:
+    profiles: ["monitoring"]
     image: quay.io/prometheuscommunity/postgres-exporter:latest
-    container_name: postgres-exporter
     restart: unless-stopped
     environment:
       - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
@@ -239,8 +248,8 @@ services:
         condition: service_healthy
 
   redis-exporter:
+    profiles: ["monitoring"]
     image: oliver006/redis_exporter:latest
-    container_name: redis-exporter
     restart: unless-stopped
     command:
       - "--redis.addr=redis:6379"
@@ -251,8 +260,8 @@ services:
         condition: service_healthy
 
   cadvisor:
+    profiles: ["monitoring"]
     image: gcr.io/cadvisor/cadvisor:latest
-    container_name: cadvisor
     restart: unless-stopped
     privileged: true
     volumes:
@@ -261,12 +270,13 @@ services:
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
     networks: [n8n-network]
+
   node-exporter:
+    profiles: ["monitoring"]
     image: prom/node-exporter:latest
-    container_name: node-exporter
     restart: unless-stopped
     pid: "host"
-    network_mode: "host"
+    networks: [n8n-network]
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
@@ -278,10 +288,10 @@ services:
 
 networks:
   n8n-network:
+    name: n8n-network
     driver: bridge
 
 volumes:
-  # Your existing external volumes
   n8n-data:
     external: true
   postgres-data:
@@ -290,6 +300,5 @@ volumes:
     external: true
   letsencrypt:
     external: true
-  # Monitoring volumes
   prometheus-data:
   grafana-data:
