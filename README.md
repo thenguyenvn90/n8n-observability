@@ -58,11 +58,42 @@ A user connects over HTTPS to Traefik, which routes requests to n8n Main.
 n8n stores data in PostgreSQL and pushes jobs to Redis; the Worker and Task Runner pull from Redis, process workflows, and write results back to Postgres.
 Prometheus collects metrics from Traefik, n8n, and the exporters, and Grafana shows dashboards (behind Basic Auth).
 
+**n8n Single Mode Observability Architecture**
+```mermaid
+flowchart LR
+ subgraph n8n_stack["n8n Stack (single mode)"]
+        n8n["n8n"]
+        postgres[("PostgreSQL")]
+  end
+ subgraph obs["Observability"]
+        prom["Prometheus"]
+        grafana["Grafana"]
+        pgexp["Postgres Exporter"]
+        cad["cAdvisor"]
+        nodeexp["Node Exporter"]
+  end
+ subgraph host["Docker Host (Ubuntu VPS)"]
+        traefik["Traefik - HTTPS & routing"]
+        n8n_stack
+        obs
+  end
+    user["User"] -- HTTPS --> traefik
+    traefik -- HTTPS --> n8n
+    n8n -- SQL --> postgres
+    n8n -- /metrics --> prom
+    traefik -- /metrics --> prom
+    pgexp -- /metrics --> prom
+    cad -- /metrics --> prom
+    nodeexp -- /metrics --> prom
+    grafana <--> prom
+    user -- HTTPS + Basic Auth --> grafana
+```
+**n8n Queue Mode Observability Architecture**
 ```mermaid
 graph LR
   user[User]
 
-  subgraph host["Docker Host"]
+  subgraph host["Docker Host (Ubuntu VPS)"]
     traefik[Traefik - HTTPS & routing]
 
     subgraph n8n_stack["n8n Stack (queue mode)"]
