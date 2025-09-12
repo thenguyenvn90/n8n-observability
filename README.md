@@ -1,37 +1,168 @@
 # n8n-observability
 
-**n8n-observability** is a ready-to-use monitoring stack for n8n (queue mode) with production-level metrics, dashboards, and alerts—built on Prometheus, Grafana, Traefik, and exporters for PostgreSQL, Redis, Node, and containers.
+**n8n-observability** is a ready-to-use monitoring stack for n8n (queue mode) with production-grade metrics, dashboards, and alerts — built on **Prometheus**, **Grafana**, **Traefik**, and exporters for **PostgreSQL**, **Redis**, **Node**, and **containers**.
 
 > **What you get**
 >
-> - Reverse proxy & HTTPS: **Traefik** (auto TLS via Let’s Encrypt)
-> - Data services: **PostgreSQL**, **Redis**
-> - Metrics: **Prometheus**, **cAdvisor**, **Postgres/Redis exporters**, n8n + Traefik metrics
-> - Dashboards & Alerts: **Grafana** (pre-provisioned datasource & folders)
-> - n8n in **queue mode**: `main` + `worker` + **external task runner**
+> - **Reverse proxy & HTTPS:** Traefik (auto TLS via Let’s Encrypt)
+> - **Data services:** PostgreSQL, Redis
+> - **Metrics:** Prometheus, cAdvisor, Postgres/Redis exporters, Traefik & n8n metrics
+> - **Dashboards & Alerts:** Grafana (pre-provisioned datasource & folders)
+> - **n8n in queue mode:** `main` + `worker` + **external task runner**
 
 ---
 
 ## Table of Contents
 
-1. [Prerequisites](#prerequisites)
-2. [Folder Layout](#folder-layout)
-3. [.env Configuration](#env-configuration)
-4. [DNS Records](#dns-records)
-5. [Traefik Basic Auth (dashboards)](#traefik-basic-auth-dashboards)
-6. [Compose Files & Configs](#compose-files--configs)
-7. [Bring the Stack Up](#bring-the-stack-up)
-8. [Health Checks & Sanity Testing](#health-checks--sanity-testing)
-9. [Accessing Dashboards](#accessing-dashboards)
-10. [Dashboards to Import](#dashboards-to-import)
-11. [Alerts to Set Up](#alerts-to-set-up)
-12. [Maintenance & Upgrades](#maintenance--upgrades)
-13. [Backups](#backups)
-14. [Security Tips](#security-tips)
-15. [Troubleshooting](#troubleshooting)
-16. [FAQ](#faq)
+1. [Architecture Overview](#architecture-overview)
+2. [Task Processing Flow (Queue Mode)](#task-processing-flow-queue-mode)
+3. [Prerequisites](#prerequisites)
+4. [Folder Layout](#folder-layout)
+5. [Generate Strong Secrets](#generate-strong-secrets)
+6. [DNS Records](#dns-records)
+7. [Traefik Basic Auth (dashboards)](#traefik-basic-auth-dashboards)
+8. [Bring the Stack Up](#bring-the-stack-up)
+9. [Health Checks & Sanity Testing](#health-checks--sanity-testing)
+10. [Accessing Dashboards](#accessing-dashboards)
+11. [Dashboards to Import](#dashboards-to-import)
+12. [Alerts to Set Up](#alerts-to-set-up)
+13. [Maintenance & Upgrades](#maintenance--upgrades)
+14. [Backups](#backups)
+15. [Security Tips](#security-tips)
+16. [Troubleshooting](#troubleshooting)
+17. [FAQ](#faq)
+18. [Contributing](#contributing)
+19. [License](#license)
+
 ---
 
+## Architecture Overview
+
+This deployment runs **n8n on Docker** with a secure edge, durable storage, and optional observability.
+
+| Component | Purpose | Why it matters |
+|---|---|---|
+| **Traefik (HTTPS gateway)** | Terminates TLS (Let’s Encrypt), routes requests to services, applies Basic Auth to dashboards. | One entry point with automatic HTTPS and access control keeps the stack secure and simple to operate. |
+| **n8n Main** | Serves the UI, API, webhooks, and schedules; enqueues jobs to Redis in queue mode. | Separates the control plane from execution so the app stays responsive under load. |
+| **n8n Worker(s)** | Consume queued jobs from Redis and execute workflows. | Horizontal scaling: add workers to increase throughput without touching the UI/API. |
+| **Task Runner (external)** | Runs long-lived or isolated tasks outside the main process. | Prevents heavy jobs from blocking the main app; improves stability and isolation. |
+| **PostgreSQL** | Stores workflows, credentials, executions, and settings. | Durable, consistent system of record enables reliable restores and migrations. |
+| **Redis (BullMQ)** | Acts as the message/queue backend for workflow executions. | Decouples ingestion from execution; smooths spikes and supports parallelism. |
+| **Prometheus** | Scrapes metrics from n8n, Traefik, and exporters. | Foundation for alerting and capacity planning with a standard metrics model. |
+| **Grafana** | Visualizes Prometheus data and manages alerts. | Fast troubleshooting and visibility with shared dashboards for the whole team. |
+| **Exporters** *(Postgres, Redis, cAdvisor, Node Exporter)* | Expose service/host metrics in Prometheus format. | Deep operational insight: DB health, cache stats, container/host resources. |
+
+**High-level view**
+
+A user connects over HTTPS to Traefik, which routes requests to n8n Main.
+n8n stores data in PostgreSQL and pushes jobs to Redis; the Worker and Task Runner pull from Redis, process workflows, and write results back to Postgres.
+Prometheus collects metrics from Traefik, n8n, and the exporters, and Grafana shows dashboards (behind Basic Auth).
+
+```mermaid
+graph LR
+  user[User]
+
+  subgraph host["Docker Host"]
+    traefik[Traefik - HTTPS & routing]
+
+    subgraph n8n_stack["n8n Stack (queue mode)"]
+      main[n8n Main]
+      worker[n8n Worker]
+      runner[Task Runner]
+      postgres[(PostgreSQL)]
+      redis[(Redis)]
+    end
+
+    subgraph obs["Observability"]
+      prom[Prometheus]
+      grafana[Grafana]
+      pgexp[Postgres Exporter]
+      redexp[Redis Exporter]
+      cad[cAdvisor]
+      nodeexp[Node Exporter]
+    end
+  end
+
+  %% Traffic (labeled)
+  user -- HTTPS --> traefik
+  traefik -- HTTPS --> main
+  main -- SQL --> postgres
+  main <--> redis
+  worker <--> redis
+  runner <--> redis
+
+  %% Metrics
+  main -- /metrics --> prom
+  traefik -- /metrics --> prom
+  pgexp -- /metrics --> prom
+  redexp -- /metrics --> prom
+  cad -- /metrics --> prom
+  nodeexp -- /metrics --> prom
+
+  %% Dashboards
+  grafana <--> prom
+  user -- HTTPS + Basic Auth --> grafana
+```
+## Task Processing Flow (Queue Mode)
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Traefik
+    participant M as n8n Main
+    participant R as Redis (Queue)
+    participant W as n8n Worker
+    participant X as Task Runner
+    participant DB as PostgreSQL
+    participant G as Grafana
+    participant P as Prometheus
+    participant PE as Postgres Exporter
+    participant RE as Redis Exporter
+    participant CA as cAdvisor
+    participant NE as Node Exporter
+
+    %% --- App request & execution (queue mode) ---
+    U->>T: HTTPS request (UI / API / Webhook)
+    T->>M: Route to n8n Main
+
+    Note over M: EXECUTIONS_MODE = queue
+
+    M->>DB: Read/write config & credentials
+    M->>DB: Create execution (pending)
+    M->>R: Enqueue job ID
+
+    loop Poll for work
+        W->>R: Fetch next job
+        R-->>W: Return job ID
+    end
+    W->>DB: Load workflow/data
+    W->>W: Execute workflow
+    W->>DB: Save results (success/fail)
+
+    opt External Task Runner enabled
+        X->>R: Poll queue
+        R-->>X: Job ID
+        X->>M: Report results/status
+    end
+
+    U->>T: Check execution status
+    T->>M: /executions/:id
+    M->>DB: Read status
+    M-->>T: Status JSON
+    T-->>U: Response
+
+    %% --- Monitoring & dashboards ---
+    U->>T: Open Grafana
+    T->>G: Route to Grafana
+    G->>P: Query metrics for dashboards
+
+    P->>M: GET /metrics (n8n)
+    P->>T: GET /metrics (Traefik)
+    P->>PE: GET /metrics (Postgres)
+    P->>RE: GET /metrics (Redis)
+    P->>CA: GET /metrics (cAdvisor)
+    P->>NE: GET /metrics (Node Exporter)
+
+```
 ## Prerequisites
 
 - A Linux server (Ubuntu 22.04+ or similar) with ports **80** and **443** open to the internet.
