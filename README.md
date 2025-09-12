@@ -52,7 +52,7 @@ This deployment runs **n8n on Docker** with a secure edge, durable storage, and 
 | **Grafana** | Visualizes Prometheus data and manages alerts. | Fast troubleshooting and visibility with shared dashboards for the whole team. |
 | **Exporters** *(Postgres, Redis, cAdvisor, Node Exporter)* | Expose service/host metrics in Prometheus format. | Deep operational insight: DB health, cache stats, container/host resources. |
 
-**High-level view**
+### High-level view
 
 A user connects over HTTPS to Traefik, which routes requests to n8n Main.
 n8n stores data in PostgreSQL and pushes jobs to Redis; the Worker and Task Runner pull from Redis, process workflows, and write results back to Postgres.
@@ -103,7 +103,7 @@ graph LR
   grafana <--> prom
   user -- HTTPS + Basic Auth --> grafana
 ```
-## Task Processing Flow (Queue Mode)
+### Task Processing Flow (Queue Mode)
 ```mermaid
 sequenceDiagram
     participant U as User
