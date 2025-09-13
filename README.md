@@ -90,49 +90,71 @@ flowchart LR
 ```
 **n8n Queue Mode Observability Architecture**
 ```mermaid
-graph LR
-  user[User]
+---
+config:
+  theme: base
+  look: neo
+---
+flowchart LR
+  user["User"]
 
   subgraph host["Docker Host (Ubuntu VPS)"]
-    traefik[Traefik - HTTPS & routing]
+    direction LR
 
-    subgraph n8n_stack["n8n Stack (queue mode)"]
-      main[n8n Main]
-      worker[n8n Worker]
-      runner[Task Runner]
-      postgres[(PostgreSQL)]
-      redis[(Redis)]
+    traefik["Traefik<br/>HTTPS & routing"]
+
+    %% ===== n8n Stack (Queue Mode) =====
+    subgraph n8n_stack["n8n Stack (Queue Mode)"]
+      direction LR
+      main["n8n Main<br/>(UI, API, Webhooks)"]
+
+      %% DB/Queue (Redis above Postgres)
+      direction TB
+      redis[("Redis<br/>BullMQ Queue")]
+      postgres[("PostgreSQL<br/>Workflows<br/>Executions<br/>Credentials")]
+
+      %% Workers
+      direction TB
+      worker1["n8n Worker #1"]
+      worker2["n8n Worker #2"]
     end
 
+    %% ===== Observability =====
     subgraph obs["Observability"]
-      prom[Prometheus]
-      grafana[Grafana]
-      pgexp[Postgres Exporter]
-      redexp[Redis Exporter]
-      cad[cAdvisor]
-      nodeexp[Node Exporter]
+      direction TB
+      prom["Prometheus"]
+      grafana["Grafana"]
+      pgexp["Postgres Exporter"]
+      redexp["Redis Exporter"]
+      cad["cAdvisor"]
+      nodeexp["Node Exporter"]
     end
   end
 
-  %% Traffic (labeled)
-  user -- HTTPS --> traefik
-  traefik -- HTTPS --> main
-  main -- SQL --> postgres
-  main <--> redis
-  worker <--> redis
-  runner <--> redis
+  %% ===== Traffic & App flows =====
+  user -->|HTTPS 443| traefik
+  traefik -->|HTTPS 443| main
 
-  %% Metrics
+  main -->|Enqueue jobs 6379| redis
+  main <-->|SQL 5432| postgres
+
+  redis <--> |Jobs/Ack 6379| worker1
+  redis <--> |Jobs/Ack 6379| worker2
+  postgres <--> |SQL 5432| worker1
+  postgres <--> |SQL 5432| worker2
+
+  %% ===== Metrics =====
   main -- /metrics --> prom
   traefik -- /metrics --> prom
   pgexp -- /metrics --> prom
   redexp -- /metrics --> prom
   cad -- /metrics --> prom
   nodeexp -- /metrics --> prom
-
-  %% Dashboards
   grafana <--> prom
-  user -- HTTPS + Basic Auth --> grafana
+
+  %% Grafana via Traefik
+  user -->|HTTPS 443 + Basic Auth| traefik
+  traefik -->|HTTPS 443| grafana
 ```
 ### Task Processing Flow (Queue Mode)
 ```mermaid
