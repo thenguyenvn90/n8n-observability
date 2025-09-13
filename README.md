@@ -90,11 +90,6 @@ flowchart LR
 ```
 **n8n Queue Mode Observability Architecture**
 ```mermaid
----
-config:
-  theme: base
-  look: neo
----
 flowchart LR
   user["User"]
 
