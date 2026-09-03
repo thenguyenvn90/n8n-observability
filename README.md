@@ -434,18 +434,129 @@ In Grafana, go to **Dashboards → Import**, search by ID or paste JSON.
 
 ---
 
+## Metrics: what n8n actually exposes
+
+`N8N_METRICS=true` mounts the endpoint. Everything else is opt-in, and only two of
+the two dozen flags are on by default. Read from `PrometheusMetricsConfig` in
+`packages/@n8n/config/src/configs/endpoints.config.ts`.
+
+| Flag | Default | What it adds |
+|---|---|---|
+| `N8N_METRICS` | `false` | Mounts `/metrics` |
+| `N8N_METRICS_PREFIX` | `n8n_` | Prefix on every name |
+| `…INCLUDE_DEFAULT_METRICS` | **`true`** | Node process and runtime: CPU, heap, event-loop lag percentiles, file descriptors |
+| `…INCLUDE_WORKFLOW_EXECUTION_DURATION` | **`true`** | The execution histogram, labelled `status` and `mode` |
+| `…INCLUDE_QUEUE_METRICS` | `false` | The four scaling-mode job counters below |
+| `…QUEUE_METRICS_INTERVAL` | `20` | Seconds between job-count samples |
+| `…INCLUDE_WORKFLOW_ID_LABEL` | `false` | `workflow_id` on the duration histogram |
+| `…INCLUDE_WORKFLOW_NAME_LABEL` | `false` | `workflow_name` on event-bus counters |
+| `…INCLUDE_NODE_TYPE_LABEL` | `false` | `node_type`, but **only** on event-bus node counters |
+| `…INCLUDE_CREDENTIAL_TYPE_LABEL` | `false` | `credential_type` on audit counters |
+| `…INCLUDE_MESSAGE_EVENT_BUS_METRICS` | `false` | One counter generated per event name |
+| `…INCLUDE_CACHE_METRICS` | `false` | Cache hits, misses, updates |
+| `…INCLUDE_API_ENDPOINTS` | `false` | HTTP request histogram plus `n8n_last_activity` |
+| `…INCLUDE_WORKFLOW_STATISTICS` | `false` | Statistics gauges derived from the database |
+| `…INCLUDE_EXECUTION_DATA_METRICS` | `false` | Reads, writes, sizes, durations, storage mode |
+| `…INCLUDE_DB_POOL_METRICS` | `false` | Pool active, idle, max, pending, acquire histogram |
+| `…INCLUDE_SCHEDULER_METRICS` | `false` | Durable scheduler: dispatch lag, pending, due, dead-lettered |
+| `…INCLUDE_POLL_TRIGGER_METRICS` | `false` | Poll duration, errors, overlapping ticks, cursor commits |
+| `…INCLUDE_WEBHOOK_METRICS` | `false` | Webhook duration by method, status, path, workflow |
+| `…INCLUDE_FORM_METRICS` | `false` | Form submission duration |
+| `…INCLUDE_WORKFLOW_INFO` | `false` | A gauge mapping workflow id to name |
+| `…INCLUDE_SSRF_METRICS` | `false` | SSRF checks, blocks, durations |
+| `…INCLUDE_DNS_CACHE_METRICS` | `false` | DNS cache size, hits, misses, evictions |
+| `…INCLUDE_WORKFLOW_PUBLICATION_METRICS` | `false` | Publication lifecycle, around fifteen series |
+
+**The one combination to avoid.** `NODE_TYPE_LABEL` on its own does nothing. Paired
+with `MESSAGE_EVENT_BUS_METRICS` it multiplies event × workflow × node type, and that
+product is where cardinality gets away from you. `WORKFLOW_ID_LABEL` alone is well
+behaved: roughly 3,800 series at 35 workflows, growing linearly.
+
+### The four queue metrics, and four caveats
+
+```
+n8n_scaling_mode_queue_jobs_waiting     gauge      no labels
+n8n_scaling_mode_queue_jobs_active      gauge      no labels
+n8n_scaling_mode_queue_jobs_completed   counter    no labels
+n8n_scaling_mode_queue_jobs_failed      counter    no labels
+```
+
+1. **Main only.** The service requires queue mode *and* instance type `main`. Confirmed
+   on a running instance: only `role="main"` carries them.
+2. **Sampled, not live.** Job counts are polled every `QUEUE_METRICS_INTERVAL` seconds,
+   20 by default. A burst shorter than the interval is invisible, and scraping faster
+   only re-reads a stale value.
+3. **The counters are lossy.** Completed and failed accumulate in-process from Redis
+   pub/sub, flush into the Prometheus counter each interval, then reset. Events missed
+   during a restart are gone.
+4. **Not supported in multi-main.**
+
+This is why `redis-exporter` runs with `--check-keys` here: `redis_key_size` on Bull's
+own lists is live, survives a restart of the main, and is not interval-sampled. Use
+Redis for **depth** and n8n's counters for the **rate** — Redis key sizes cannot give
+you a rate.
+
+### Two things measured here that contradict a plain reading of the source
+
+**The execution histogram is registered on both roles, not the main only.** Reading the
+lifecycle hooks suggests otherwise. On a live instance
+`increase(n8n_workflow_execution_duration_seconds_count[1h])` returned two series — 3
+on one role and 4 on the other — while `n8n_scaling_mode_queue_jobs_completed` read
+exactly 7 over the same hour. **Every query that treats that histogram as a total must
+wrap it in `sum()`**, or it reports one role's share and looks like headroom.
+
+**A labelled histogram publishes nothing until its first observation.** After enabling
+webhook and API metrics, `n8n_webhook_request_duration_seconds` emitted only `# HELP`
+and `# TYPE` lines. With labels and zero observations there is no label combination to
+emit. Grepping for data says "missing"; grepping for the declaration says "registered,
+waiting". The second is the truth.
+
+---
+
 ## Alerts to Set Up
 
-Use **Grafana Alerting** (recommended) or Prometheus rules. Example queries:
+Use **Grafana Alerting** (recommended) or Prometheus rules. Every metric name below is
+verbatim from a running instance.
 
-- **n8n execution failures (rate over 5m)**
+- **Jobs failing, as a rate.** The queue counters are the only source for a failure
+  rate; Redis key sizes give a backlog, never a rate. Use a window of 10m or more —
+  the counters are flushed in interval-sized lumps, so shorter ranges are quantisation
+  noise.
   ```promql
-  rate(n8n_execution_failed_total[5m]) > 0
+  rate(n8n_scaling_mode_queue_jobs_failed[15m])
+    / clamp_min(rate(n8n_scaling_mode_queue_jobs_completed[15m])
+              + rate(n8n_scaling_mode_queue_jobs_failed[15m]), 0.0001) > 0.05
   ```
 
-- **Queue backlog (BullMQ waiting)**
+- **The queue is falling behind.** Backlog trending up rather than a fixed threshold,
+  which does not need tuning per deployment.
   ```promql
-  max(n8n_queue_bull_queue_waiting) > 100
+  deriv(n8n_scaling_mode_queue_jobs_waiting[15m]) > 0
+  ```
+
+- **Work is queueing while every worker is busy.** Written as a product on purpose: it
+  says the worker pool is the constraint **without naming a slot count**. The ceiling
+  lives in the worker's `--concurrency` flag, which no metric exposes, so a rule with a
+  number in it goes stale the day that flag changes.
+  ```promql
+  min_over_time(n8n_scaling_mode_queue_jobs_waiting[10m])
+    * min_over_time(n8n_scaling_mode_queue_jobs_active[10m]) > 0
+  ```
+
+- **Waiting on database connections.** Pool exhaustion is a documented queue-mode
+  failure and it presents as slowness, not an error. Raise `DB_POSTGRESDB_POOL_SIZE`
+  before raising concurrency further.
+  ```promql
+  max(n8n_db_pool_requests_pending) > 0
+  ```
+
+- **Worker pool saturation.** Seconds of work arriving per second over the slots
+  available. Above 0.7 sustained, provision more; above 1.0 the backlog grows without
+  bound; below 0.3 concurrency is not the constraint. Substitute your own
+  workers × concurrency for the divisor.
+  ```promql
+  sum(rate(n8n_workflow_execution_duration_seconds_sum[10m]))
+    / (count(up{job="n8n",role="worker"} == 1) * 10) > 0.7
   ```
 
 - **Traefik 5xx error rate > 1%**

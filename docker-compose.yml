@@ -92,7 +92,32 @@ services:
     env_file: [.env]
     environment:
       - N8N_METRICS=true
+      # The four n8n_scaling_mode_queue_jobs_* metrics. Main-only by design, and
+      # sampled rather than live: n8n polls Bull on an interval and flushes its
+      # completed/failed counters in lumps, so a burst shorter than the interval is
+      # invisible and events missed during a restart are gone. Redis key checks
+      # (see redis-exporter) cover depth; these cover the rate.
       - N8N_METRICS_INCLUDE_QUEUE_METRICS=true
+      # 20s is the default and too coarse to see a burst arrive.
+      - N8N_METRICS_QUEUE_METRICS_INTERVAL=5
+      # The ceiling that concurrency competes for. Pool exhaustion is a documented
+      # queue-mode failure and it presents as slowness, not as an error, so
+      # n8n_db_pool_requests_pending above zero is the signal to read before
+      # raising --concurrency any further.
+      - N8N_METRICS_INCLUDE_DB_POOL_METRICS=true
+      # How work arrives, per workflow and status code.
+      - N8N_METRICS_INCLUDE_WEBHOOK_METRICS=true
+      # workflow_id on the duration histogram: roughly 3,800 series at 35 workflows,
+      # growing linearly and never collected until restart. Safe at this size.
+      # NODE_TYPE_LABEL is deliberately absent — on its own it adds nothing, and
+      # paired with MESSAGE_EVENT_BUS_METRICS it multiplies event x workflow x node.
+      - N8N_METRICS_INCLUDE_WORKFLOW_ID_LABEL=true
+      # A gauge mapping workflow id to name, so dashboards can show names.
+      - N8N_METRICS_INCLUDE_WORKFLOW_INFO=true
+      # n8n_last_activity plus an HTTP request histogram.
+      - N8N_METRICS_INCLUDE_API_ENDPOINTS=true
+      - N8N_METRICS_INCLUDE_CACHE_METRICS=true
+      - N8N_METRICS_INCLUDE_EXECUTION_DATA_METRICS=true
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
@@ -158,8 +183,22 @@ services:
     restart: unless-stopped
     env_file: [.env]
     environment:
+      # Required for Prometheus to reach the worker at all. In queue mode the worker
+      # is where executions run, and it registers the execution histogram alongside
+      # the main: scraping only the main loses about half the execution data and all
+      # of the worker's CPU, heap and event-loop lag.
       - N8N_METRICS=true
-    command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY}"]
+      # Without this a queue worker exposes no health endpoint whatsoever, which is
+      # why the healthcheck below could not exist before.
+      - QUEUE_HEALTH_CHECK_ACTIVE=true
+    # --concurrency is a CLI flag with no environment fallback (confirmed from
+    # `n8n worker --help` on a running container), so it has to be interpolated
+    # here. The default is n8n's own: 10. n8n warns below 5 that the environment
+    # may be unstable. For LLM-bound work — mostly waiting on HTTP — start at the
+    # default and read pool saturation and worker CPU before changing it; a Node
+    # worker saturates near one core however many the host has, so once CPU
+    # approaches 1.0 the answer is another worker process, not a higher number.
+    command: ["worker", "--concurrency=${N8N_WORKER_CONCURRENCY:-10}"]
     volumes:
       - n8n-data:/home/node/.n8n
       - ./local-files:/files
@@ -168,6 +207,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
     networks: [n8n-network]
     security_opt: [no-new-privileges:true]
 
@@ -180,7 +225,11 @@ services:
     restart: unless-stopped
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.retention.time=15d"
+      # 90d rather than 15d. The questions this stack exists to answer — when is the
+      # system busy, is the queue trending worse, did that change help — need more
+      # than a fortnight. At this cardinality the cost is small: a live instance at
+      # roughly 8,000 series was using single-digit megabytes per day.
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-90d}"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
@@ -211,8 +260,15 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      # The provider file lives here and points at /var/lib/grafana/dashboards,
+      # which is where the repo's JSON is mounted below. Without a provider file
+      # Grafana provisions nothing, and the dashboards in ./dashboard had to be
+      # imported by hand.
       - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./monitoring/grafana/provisioning/alerts:/etc/grafana/provisioning/alerts:ro
+      - ./dashboard:/var/lib/grafana/dashboards:ro
+      # "alerting", not "alerts" — Grafana reads only the former, so anything
+      # placed in an "alerts" directory was silently ignored.
+      - ./monitoring/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
     networks: [n8n-network]
     labels:
       - "traefik.enable=true"
@@ -254,6 +310,11 @@ services:
     command:
       - "--redis.addr=redis:6379"
       - "--redis.password=${STRONG_PASSWORD}"
+      # Queue depth straight from Bull's own keys, as redis_key_size. Better than
+      # n8n's gauges for depth: live rather than sampled, and it keeps reporting
+      # while the main process is restarting. Bull deletes a list once it empties,
+      # so a missing key means zero — every query over these needs `or vector(0)`.
+      - "--check-keys=bull:jobs:wait,bull:jobs:active,bull:jobs:delayed,bull:jobs:failed,bull:jobs:paused"
     networks: [n8n-network]
     depends_on:
       redis:
@@ -264,11 +325,21 @@ services:
     image: gcr.io/cadvisor/cadvisor:latest
     restart: unless-stopped
     privileged: true
+    # Left at its defaults on a busy host, cAdvisor's payload grows large enough to
+    # be refused by a scraper with a response-size limit — seen on a live box. The
+    # collectors turned off below are the ones that grow per container and answer no
+    # question this stack asks; CPU, memory, network and filesystem all survive.
+    command:
+      - "--housekeeping_interval=15s"
+      - "--docker_only=true"
+      - "--store_container_labels=false"
+      - "--disable_metrics=percpu,sched,tcp,udp,advtcp,process,hugetlb,referenced_memory,cpu_topology,resctrl"
     volumes:
       - /:/rootfs:ro
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
     networks: [n8n-network]
 
   node-exporter:

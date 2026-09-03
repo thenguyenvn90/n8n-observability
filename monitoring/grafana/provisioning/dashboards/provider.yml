@@ -1,0 +1,12 @@
+# Without this file Grafana provisions no dashboards at all, whatever is mounted:
+# the JSON in ./dashboard had to be imported by hand. `path` points at where
+# docker-compose mounts that directory inside the container.
+apiVersion: 1
+providers:
+  - name: n8n
+    type: file
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

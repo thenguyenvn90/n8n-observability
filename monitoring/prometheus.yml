@@ -8,11 +8,30 @@ scrape_configs:
     static_configs:
       - targets: ["prometheus:9090"]
 
-  # n8n (main service exposes /metrics on 5678)
+  # n8n — BOTH the main and the worker.
+  #
+  # In queue mode the worker is where executions actually run, and both processes
+  # register n8n_workflow_execution_duration_seconds. Measured on a live instance:
+  # one role reported 3 executions in an hour and the other 4, while the queue's own
+  # n8n_scaling_mode_queue_jobs_completed counter read exactly 7. Scraping only the
+  # main therefore loses about half the execution data, and loses worker CPU, heap
+  # and event-loop lag entirely — the three signals that decide whether to raise
+  # --concurrency or add a worker process.
+  #
+  # The `role` label is what makes the two distinguishable. Every query that reads a
+  # per-role metric as a total must wrap it in sum(); without that it silently
+  # reports one role's share.
+  #
+  # The worker needs N8N_METRICS=true in its own environment to answer here.
   - job_name: n8n
     metrics_path: /metrics
     static_configs:
       - targets: ["main:5678"]
+        labels:
+          role: main
+      - targets: ["worker:5678"]
+        labels:
+          role: worker
 
   # Traefik metrics (internal entrypoint on :8081)
   - job_name: traefik
@@ -25,7 +44,14 @@ scrape_configs:
     static_configs:
       - targets: ["postgres-exporter:9187"]
 
-  # Redis exporter
+  # Redis exporter.
+  #
+  # With --check-keys set on the exporter (see docker-compose.yml) this also yields
+  # redis_key_size for the Bull queue lists, which is a better source of queue depth
+  # than n8n's own gauges: it is read live from Redis, it survives a restart of the
+  # main process, and it is not sampled on an interval. n8n's four
+  # n8n_scaling_mode_queue_jobs_* metrics remain the only source for a completed and
+  # failed RATE, so both are worth having.
   - job_name: redis
     static_configs:
       - targets: ["redis-exporter:9121"]
@@ -35,8 +61,7 @@ scrape_configs:
     static_configs:
       - targets: ["cadvisor:8080"]
 
-  # --- OPTIONAL: Node Exporter ---
-  Use this if your node-exporter runs on the same Docker network (no host networking).
+  # Node Exporter, on the same Docker network (no host networking).
   - job_name: node-exporter
     static_configs:
       - targets: ["node-exporter:9100"]
