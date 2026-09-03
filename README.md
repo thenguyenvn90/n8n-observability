@@ -434,6 +434,62 @@ In Grafana, go to **Dashboards → Import**, search by ID or paste JSON.
 
 ---
 
+## What it looks like running
+
+Every image below is rendered from a live queue-mode instance — n8n 2.37.7, one main
+and one worker on 2 vCPU — not a mock-up. They come out of the stack itself: the
+`renderer` service is `grafana-image-renderer`, and any dashboard or single panel can
+be exported as a PNG with no browser involved.
+
+![n8n queue mode dashboard](docs/img/n8n-queue-mode-dashboard.png)
+
+### Is work piling up
+
+Waiting climbing while active stays flat is the shape that says the workers are the
+bottleneck rather than the load.
+
+![Queue depth over time](docs/img/queue-depth-over-time.png)
+
+The dashed line is the ceiling — live workers times concurrency. If the solid line
+ever crosses it, the concurrency figure the dashboard was told is out of date.
+
+![Slots occupied against the ceiling](docs/img/slots-occupied.png)
+
+### Is one worker enough
+
+Two gauges answer it together. Saturation is seconds of work arriving per second over
+the slots available: above 0.7 sustained, provision more; below 0.3, concurrency is
+not the constraint. Worker CPU is in cores, and a Node worker saturates near 1.0
+however many the host has — so CPU near one core means another worker process, not a
+higher number.
+
+![Pool saturation](docs/img/pool-saturation.png)
+![Worker CPU in cores](docs/img/worker-cpu.png)
+
+### The ceiling under any concurrency change
+
+Active connections against the pool maximum. Raising concurrency multiplies demand
+here, and exhausting the pool presents as slowness rather than an error.
+
+![Database pool connections](docs/img/db-pool-connections.png)
+
+### Throughput and failure rate
+
+n8n's queue counters are the only source for a failure *rate*; Redis key sizes give a
+backlog and never a rate.
+
+![Jobs completed and failed per minute](docs/img/jobs-completed-failed.png)
+
+### Is n8n struggling, or just waiting
+
+Event-loop lag separates the two. Node runs one thread: when this climbs, the process
+is CPU-starved and no amount of extra concurrency helps.
+
+![Event loop lag p99](docs/img/event-loop-lag.png)
+![Execution duration, median and p95](docs/img/execution-duration.png)
+
+---
+
 ## Metrics: what n8n actually exposes
 
 `N8N_METRICS=true` mounts the endpoint. Everything else is opt-in, and only two of
